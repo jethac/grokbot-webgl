@@ -1,5 +1,8 @@
 /* WebGL2 SDF rasterizer for the Grok Bot. Grok mode is a flat ink cutout.
-   Kirby mode lights the same silhouette as a puffball and dresses the face. */
+   Kirby mode is a cel-shaded puffball driven by the same state engine:
+   the silhouette transform (scale, offset, spin, squash) moves the whole
+   body, so every animation state reads as Kirby. Face follows @Kirby_JP /
+   Kirby Super Star Ultra proportions. */
 
 const VERT = `#version 300 es
 in vec2 aPos;
@@ -17,11 +20,17 @@ uniform vec2 uCenter;
 uniform float uRadii[64];
 uniform vec4 uSil;          // rot, cx, cy, unused
 uniform vec2 uSquash;       // sx, sy
+uniform float uSilScale;    // mean silhouette radius
 uniform float uBodyAlpha;
 uniform vec4 uEyePos[2];    // xy, w, h
 uniform vec4 uEyeMat[2];    // a b c d
 uniform vec2 uEyeA;         // alpha per eye
 uniform int uEyeN;
+uniform vec4 uKEye;         // openL, sizeL, openR, sizeR
+uniform vec2 uKTilt;        // eye tilt (deg) per eye
+uniform float uFaceAlpha;
+uniform float uArcEyes;     // 1 = happy closed arcs
+uniform float uMouthRound;  // 0 smile .. 1 round O
 uniform vec4 uDots[8];      // xy r opacity
 uniform vec2 uDotMeta[8];   // kind, rot-deg
 uniform int uDotN;
@@ -35,7 +44,7 @@ uniform vec4 uArcB[8];      // speed, phase, sweep, opacity
 uniform vec4 uArcC[8];      // hue, hueSpan, cx, cy
 uniform float uArcT[8];
 uniform int uArcN;
-uniform vec2 uGaze;         // yaw, pitch (deg) — pupil offset
+uniform vec2 uGaze;         // yaw, pitch (deg)
 uniform float uReduced;
 
 out vec4 fragColor;
@@ -119,7 +128,6 @@ float sdCapsuleEye(vec2 p, vec4 m, vec2 pos, float w, float h){
 
 float sdTeardrop(vec2 p, float rotDeg){
   vec2 q = rot(-rotDeg * PI / 180.0) * p;
-  // round end at origin, point along +y (screen down)
   float dBall = length(q) - 0.72;
   float dTip = sdEllipse(q - vec2(0.0, 0.95), vec2(0.22, 0.55));
   return smin(dBall, dTip, 0.18);
@@ -138,8 +146,15 @@ float sdStar5(vec2 p, float r, float rf){
   return length(p - ba * h) * sign(p.y * ba.x - p.x * ba.y);
 }
 
+float sdZ(vec2 p){
+  // unit "Z" glyph in roughly [-0.5, 0.5]
+  float top = sdRoundedBox(p - vec2(0.0, -0.34), vec2(0.32, 0.085), 0.06);
+  float bot = sdRoundedBox(p - vec2(0.0, 0.34), vec2(0.32, 0.085), 0.06);
+  float diag = sdRoundedBox(rot(-0.82) * p, vec2(0.42, 0.082), 0.06);
+  return min(min(top, bot), diag);
+}
+
 float sdArcStroke(vec2 p, vec4 A, vec4 B, vec4 C, float t){
-  // A: a, k, tilt, width   B: speed, phase, sweep, opacity   C: hue, hueSpan, cx, cy
   float ra = max(A.x, 0.05);
   float k = max(A.y, 0.04);
   float tilt = A.z;
@@ -168,203 +183,10 @@ float cover(float d, float lo, float hi){
   return 1.0 - smoothstep(lo, hi, d);
 }
 
-vec3 kirbySky(vec2 uv){
-  float g = clamp(uv.y * 0.5 + 0.5, 0.0, 1.0);
-  vec3 top = vec3(0.55, 0.82, 0.97);
-  vec3 mid = vec3(0.72, 0.90, 0.99);
-  vec3 bot = vec3(0.62, 0.86, 0.58);
-  vec3 col = mix(bot, mid, smoothstep(0.0, 0.42, g));
-  col = mix(col, top, smoothstep(0.42, 1.0, g));
-  float c1 = cover(length((uv - vec2(-0.70, 0.58)) * vec2(1.0, 1.55)), 0.09, 0.24);
-  float c2 = cover(length((uv - vec2(-0.56, 0.55)) * vec2(1.1, 1.7)), 0.07, 0.18);
-  float c3 = cover(length((uv - vec2(0.74, 0.52)) * vec2(1.0, 1.65)), 0.08, 0.22);
-  col = mix(col, vec3(1.0, 0.98, 0.96), clamp(c1 + c2 + c3, 0.0, 1.0) * 0.5);
-  return col;
-}
+/* ------------------------------------------------------------- grok scene */
 
-float sdSphere3(vec3 p, float r){ return length(p) - r; }
-
-float sdEllipsoid3(vec3 p, vec3 r){
-  float k0 = length(p / r);
-  float k1 = length(p / (r * r));
-  return k0 * (k0 - 1.0) / max(k1, 1e-4);
-}
-
-// id: 0 body/arms, 1 feet, 2 mouth cavity
-vec2 mapKirby(vec3 p){
-  float breath = 1.0 + 0.012 * sin(uTime * 1.85);
-  float bob = 0.010 * sin(uTime * 1.85 + 0.4);
-  p.y -= bob;
-  vec3 bp = p;
-  bp.y /= breath;
-
-  // body sits on the shoes — feet behind the puff so they peek out as a base
-  float body = sdSphere3(bp - vec3(0.0, 0.18, 0.0), 0.70);
-
-  float swing = 0.05 * sin(uTime * 2.35);
-  float armL = sdSphere3(p - vec3(-0.66, 0.08 + swing, -0.18), 0.23);
-  float armR = sdSphere3(p - vec3( 0.66, 0.08 - swing * 0.7, -0.18), 0.23);
-  float arms = smin(armL, armR, 0.04);
-  float flesh = smin(body, arms, 0.07);
-
-  // planted behind the body; only the soles show under the silhouette
-  float ground = -0.68;
-  vec3 fl = p - vec3(-0.26, -0.54, 0.20);
-  fl.xz = rot(0.20) * fl.xz;
-  float footL = sdEllipsoid3(fl, vec3(0.20, 0.15, 0.16));
-  footL = max(footL, ground - p.y);
-  vec3 fr = p - vec3( 0.26, -0.54, 0.20);
-  fr.xz = rot(-0.20) * fr.xz;
-  float footR = sdEllipsoid3(fr, vec3(0.20, 0.15, 0.16));
-  footR = max(footR, ground - p.y);
-  float feet = smin(footL, footR, 0.05);
-
-  float d = smin(flesh, feet, 0.03);
-  float id = feet < flesh ? 1.0 : 0.0;
-  return vec2(d, id);
-}
-
-vec3 kirbyNormal(vec3 p){
-  vec2 e = vec2(0.0018, -0.0018);
-  return normalize(
-    e.xyy * mapKirby(p + e.xyy).x +
-    e.yyx * mapKirby(p + e.yyx).x +
-    e.yxy * mapKirby(p + e.yxy).x +
-    e.xxx * mapKirby(p + e.xxx).x
-  );
-}
-
-void kirbyEye(inout vec3 col, vec2 f, vec2 c, float open){
-  // HAL sheet: the oval IS the pupil. No sclera. Cyan crescent at the bottom,
-  // one large painted white circle at the top. No phong.
-  float hh = 0.235 * mix(0.18, 1.0, clamp(open, 0.0, 1.0));
-  float ww = 0.118;
-  float dW = sdEllipse(f - c, vec2(ww, hh));
-  float ew = cover(dW, -0.007, 0.005);
-  if(ew < 0.01) return;
-
-  vec3 eye = vec3(0.06, 0.06, 0.09);
-
-  // cyan crescent at the bottom of the pupil (ellipse minus a higher ellipse)
-  vec2 bA = c + vec2(0.0, hh * 0.36);
-  vec2 bB = c + vec2(0.0, hh * -0.04);
-  float dBlue = max(dW, max(sdEllipse(f - bA, vec2(ww * 1.05, hh * 0.66)),
-                            -sdEllipse(f - bB, vec2(ww * 1.18, hh * 0.80))));
-  eye = mix(eye, vec3(0.34, 0.68, 1.0), cover(dBlue, -0.004, 0.004));
-
-  // white oval: same aspect as the dark oval, tops aligned so the top 180°
-  // shares that curvature (not a circle)
-  vec2 wr = vec2(ww, hh) * 0.62;
-  vec2 wc = c + vec2(0.0, -hh + wr.y + 0.010);
-  float dHi = max(dW, sdEllipse(f - wc, wr));
-  eye = mix(eye, vec3(1.0), cover(dHi, -0.003, 0.004));
-
-  col = mix(col, eye, ew);
-}
-
-vec3 renderKirby(vec2 p, vec3 bg){
-  // Kirby faces the camera. Grok's 3/4 rest gaze is not applied.
-  vec3 ro = vec3(p.x, -p.y + 0.08, -2.55);
-  vec3 rd = vec3(0.0, 0.0, 1.0);
-
-  const float OUTW = 0.052;
-  float t = 0.0;
-  vec2 h = vec2(1.0, 0.0);
-  bool hitBody = false;
-  for(int i = 0; i < 56; i++){
-    vec3 q = ro + rd * t;
-    h = mapKirby(q);
-    if(h.x < 0.001){ hitBody = true; break; }
-    t += h.x;
-    if(t > 5.5) break;
-  }
-
-  // contact shadow
-  float sh = length((p - vec2(0.0, 0.98)) * vec2(0.90, 2.8)) - 0.36;
-  float shadow = exp(-max(sh, 0.0) * max(sh, 0.0) * 9.0) * 0.22;
-  vec3 col = bg - shadow * vec3(0.20, 0.16, 0.12);
-
-  if(!hitBody){
-    // backface hull: inflated SDF hits where the inner body missed
-    t = 0.0;
-    bool hitHull = false;
-    for(int i = 0; i < 40; i++){
-      vec3 q = ro + rd * t;
-      float d = mapKirby(q).x - OUTW;
-      if(d < 0.001){ hitHull = true; break; }
-      t += d;
-      if(t > 5.5) break;
-    }
-    if(hitHull){
-      return mix(col, vec3(0.165, 0.145, 0.275), 1.0);
-    }
-    return col;
-  }
-
-  vec3 hit = ro + rd * t;
-  vec3 N = kirbyNormal(hit);
-
-  vec3 L = normalize(vec3(-0.22, 0.55, -0.80));
-  float ndl = dot(N, L);
-  // hard 2-band cel — official Kirby shading
-  float cel = mix(0.70, 1.0, step(0.08, ndl));
-
-  vec3 pinkLit = vec3(1.00, 0.76, 0.84);
-  vec3 pinkSh = vec3(0.94, 0.58, 0.72);
-  vec3 footLit = vec3(0.91, 0.22, 0.28);
-  vec3 footSh = vec3(0.80, 0.14, 0.20);
-  vec3 albedo = mix(mix(pinkSh, pinkLit, cel), mix(footSh, footLit, cel), step(0.5, h.y));
-  col = albedo;
-
-  // front-facing face (camera looks +Z, so front is -Z)
-  if(h.y < 0.5 && N.z < -0.12){
-    vec2 f = vec2(hit.x, -hit.y);
-    // official @Kirby_JP layout, still tugged by grok gaze
-    vec2 restL = vec2(-0.155, -0.26);
-    vec2 restR = vec2( 0.155, -0.26);
-    vec2 gOff = vec2(clamp(uGaze.x, -40.0, 40.0) * 0.0012,
-                     clamp(-uGaze.y, -32.0, 32.0) * 0.0010);
-    vec2 eL = restL + gOff;
-    vec2 eR = restR + gOff;
-    float oL = 1.0;
-    float oR = 1.0;
-    if(uEyeN > 0) oL = uEyePos[0].w < 0.16 ? 0.14 : clamp(uEyeA.x, 0.16, 1.0);
-    if(uEyeN > 1) oR = uEyePos[1].w < 0.16 ? 0.14 : clamp(uEyeA.y, 0.16, 1.0);
-    kirbyEye(col, f, eL, oL);
-    kirbyEye(col, f, eR, oR);
-
-    vec2 bL = eL + vec2(-0.18, 0.18);
-    vec2 bR = eR + vec2( 0.18, 0.18);
-    float blush = cover(sdEllipse(f - bL, vec2(0.12, 0.075)), -0.01, 0.03);
-    blush = max(blush, cover(sdEllipse(f - bR, vec2(0.12, 0.075)), -0.01, 0.03));
-    col = mix(col, vec3(1.0, 0.55, 0.66), blush * 0.58 * (1.0 - uMouth));
-
-    float mw = 0.05 + 0.42 * uMouth;
-    float mh = 0.035 + 0.36 * uMouth;
-    vec2 mc = vec2(0.0, 0.16 + 0.06 * uMouth);
-    float dM = sdEllipse(f - mc, vec2(mw, mh));
-    float mm = cover(dM, -0.008, 0.006);
-    vec3 cavity = mix(vec3(0.55, 0.18, 0.28), vec3(0.28, 0.06, 0.10), smoothstep(0.2, 1.0, uMouth));
-    col = mix(col, cavity, mm * step(0.04, uMouth + 0.12));
-    if(uMouth < 0.15){
-      float dTiny = sdEllipse(f - vec2(0.0, 0.18), vec2(0.045, 0.038));
-      col = mix(col, vec3(0.75, 0.28, 0.40), cover(dTiny, -0.004, 0.005) * 0.9);
-    }
-  }
-
-  return col;
-}
-
-void main(){
-  vec2 frag = gl_FragCoord.xy;
-  // Model space is y-down (same as the reference film). gl_FragCoord is y-up.
-  vec2 p = (frag - uCenter) / uScale;
-  p.y = -p.y;
-  vec2 uv = (frag - 0.5 * uRes) / uRes.y;
-
+vec3 grokScene(vec2 p, vec2 uv, float aa){
   vec3 paper = vec3(0.949, 0.941, 0.918);
-  vec3 sky = kirbySky(uv);
-  vec3 bg = mix(paper, sky, uKirby);
 
   float dBody = sdProfile(p);
 
@@ -374,6 +196,7 @@ void main(){
     if(i >= uDotN) break;
     vec4 D = uDots[i];
     if(D.w < 0.01) continue;
+    if(uDotMeta[i].x > 1.5) continue;
     vec2 q = p - D.xy;
     float dd;
     if(uDotMeta[i].x > 0.5){
@@ -387,54 +210,18 @@ void main(){
   float dInk = smin(dBody, dDots, 0.04);
 
   // notification notch — concentric hole
-  float dNotch = 1e5;
   float dBadge = 1e5;
   if(uNotifOn > 0.5){
     dBadge = sdCircle(p - uNotif.xy, uNotif.z);
-    dNotch = sdCircle(p - uNotif.xy, uNotif.w);
+    float dNotch = sdCircle(p - uNotif.xy, uNotif.w);
     dInk = max(dInk, -dNotch);
   }
 
-  // Kirby shoes — sit under the puff, long axis almost horizontal
-  float dShoe = 1e5;
-  if(uKirby > 0.01 && uShoes > 0.01){
-    float k = uKirby * uShoes;
-    vec2 fl = vec2(-0.42, 0.96);
-    vec2 fr = vec2( 0.42, 0.96);
-    vec2 pl = rot(0.18) * (p - fl);
-    vec2 pr = rot(-0.18) * (p - fr);
-    float sl = sdEllipse(pl, vec2(0.30, 0.155) * (0.75 + 0.25 * k));
-    float sr = sdEllipse(pr, vec2(0.30, 0.155) * (0.75 + 0.25 * k));
-    dShoe = min(sl, sr);
-  }
-
-  float dOcc = smin(dInk, dShoe, 0.08);
-
-  // Kirby mouth (inhale / smile)
-  float dMouth = 1e5;
-  if(uMouth > 0.01 && uKirby > 0.05){
-    float m = uMouth;
-    vec2 mc = vec2(uSil.y, uSil.z + 0.22 + 0.12 * m);
-    dMouth = sdEllipse(p - mc, vec2(0.22 + 0.42 * m, 0.08 + 0.38 * m));
-    dMouth = max(dMouth, dBody + 0.01);
-  }
-
-  // eyes
-  float dEye[2];
-  dEye[0] = 1e5; dEye[1] = 1e5;
-  for(int i = 0; i < 2; i++){
-    if(i >= uEyeN) break;
-    if(uEyeA[i] < 0.02) continue;
-    dEye[i] = sdCapsuleEye(p, uEyeMat[i], uEyePos[i].xy, uEyePos[i].z, uEyePos[i].w);
-  }
-
-  float aa = 1.5 / uScale;
-
   // contact shadow
   float sh = length((p - vec2(uSil.y, uSil.z + 1.05)) * vec2(0.92, 2.4)) - 0.42;
-  float shadow = exp(-max(sh, 0.0) * max(sh, 0.0) * 10.0) * (0.10 + 0.16 * uKirby);
-  shadow *= cover(dOcc, -0.05, 0.35);
-  vec3 col = bg - shadow * vec3(0.18, 0.16, 0.14);
+  float shadow = exp(-max(sh, 0.0) * max(sh, 0.0) * 10.0) * 0.10;
+  shadow *= cover(dInk, -0.05, 0.35);
+  vec3 col = paper - shadow * vec3(0.18, 0.16, 0.14);
 
   // arcs behind
   for(int i = 0; i < 8; i++){
@@ -442,101 +229,27 @@ void main(){
     float op = uArcB[i].w;
     if(op < 0.01) continue;
     float dA = sdArcStroke(p, uArcA[i], uArcB[i], uArcC[i], uArcT[i]);
-    vec3 ac = wheel(uArcC[i].x + uArcC[i].y * 0.5, 0.55, mix(0.62, 0.72, uKirby));
+    vec3 ac = wheel(uArcC[i].x + uArcC[i].y * 0.5, 0.55, 0.62);
     float m = 1.0 - smoothstep(-aa, aa, dA);
-    // hide behind body
     m *= mix(1.0, 0.15, 1.0 - smoothstep(aa, -aa, dInk));
     col = mix(col, ac, m * op);
   }
 
-  // warp star (Kirby orbit)
-  if(uKirby > 0.2 && uStar > 0.02){
-    float ang = uTime * 1.6;
-    vec2 sp = rot(ang * 0.4) * (p - vec2(1.15, -0.15));
-    float dS = sdStar5(sp, 0.28, 0.42);
-    float m = 1.0 - smoothstep(-aa * 1.4, aa, dS);
-    vec3 star = mix(vec3(0.95, 0.55, 0.12), vec3(1.0, 0.88, 0.32), smoothstep(-0.08, 0.04, -dS));
-    col = mix(col, star, m * uStar * uKirby);
-  }
-
   // body fill
-  float bodyMask = 1.0 - smoothstep(-aa, aa, dInk);
-  bodyMask *= uBodyAlpha;
-
+  float bodyMask = (1.0 - smoothstep(-aa, aa, dInk)) * uBodyAlpha;
   vec3 grokInk = vec3(0.047, 0.047, 0.047);
-  vec3 pink = vec3(0.957, 0.655, 0.765);
-  vec3 pinkDeep = vec3(0.90, 0.48, 0.62);
+  col = mix(col, grokInk, bodyMask);
 
-  vec3 bodyCol = grokInk;
-
-  // 2D Kirby extras only during the morph; full Kirby is the 3D toon pass
-  if(uKirby > 0.01 && uKirby < 0.4){
-    float sm = (1.0 - smoothstep(-aa, aa, dShoe)) * uKirby * uShoes;
-    vec3 shoe = vec3(0.839, 0.227, 0.282);
-    vec3 sole = vec3(0.62, 0.12, 0.18);
-    float soleBand = smoothstep(0.88, 1.08, p.y);
-    vec3 sc = mix(shoe, sole, soleBand * 0.7);
-    sc += vec3(0.16, 0.05, 0.06) * cover(abs(p.y - 0.90), 0.0, 0.10);
-    col = mix(col, sc, sm);
-  }
-
-  col = mix(col, bodyCol, bodyMask);
-
-  // blush (2D morph only)
-  if(uKirby > 0.05 && uKirby < 0.4 && uEyeN > 0 && uMouth < 0.7){
-    for(int i = 0; i < 2; i++){
-      if(i >= uEyeN) break;
-      vec2 cheek = uEyePos[i].xy + vec2(0.0, 0.26);
-      cheek.x += sign(uEyePos[i].x - uSil.y) * 0.04;
-      float dB = sdEllipse(p - cheek, vec2(0.13, 0.07));
-      float bm = (1.0 - smoothstep(-0.02, 0.06, dB)) * (1.0 - smoothstep(-aa, aa, dBody));
-      col = mix(col, vec3(0.93, 0.42, 0.55), bm * 0.38 * uKirby);
-    }
-  }
-
-  // eyes: grok = paper holes, kirby = glossy ovals
-  vec3 grokEye = paper;
+  // eyes: paper holes
   for(int i = 0; i < 2; i++){
     if(i >= uEyeN) break;
-    float em = (1.0 - smoothstep(-aa, aa, dEye[i])) * uEyeA[i];
-    if(em < 0.001) continue;
-
-    vec3 eyeCol = grokEye;
-    if(uKirby > 0.001 && uKirby < 0.4){
-      vec4 m = uEyeMat[i];
-      float det = m.x * m.w - m.z * m.y;
-      vec2 dlt = p - uEyePos[i].xy;
-      vec2 local = vec2(m.w * dlt.x - m.z * dlt.y, -m.y * dlt.x + m.x * dlt.y) / max(det, 1e-5);
-      float w = uEyePos[i].z;
-      float h = uEyePos[i].w;
-      // pupil sits in the lower half, drifts with gaze
-      vec2 pc = vec2(clamp(uGaze.x * 0.0020, -0.18, 0.18) * w,
-                     0.06 * h + clamp(-uGaze.y * 0.0014, -0.10, 0.10) * h);
-      float pr = min(w, h) * mix(0.36, 0.54, smoothstep(0.35, 0.7, h / max(w, 0.01)));
-      float dPup = length((local - pc) / vec2(0.78, 1.08)) - pr;
-      vec3 white = vec3(0.99, 0.98, 0.97);
-      vec3 iris = mix(vec3(0.16, 0.20, 0.40), vec3(0.06, 0.07, 0.10), smoothstep(0.0, pr, -dPup));
-      float pupMask = h > w * 0.38 ? (1.0 - smoothstep(-aa * 0.6, aa, dPup)) : 0.0;
-      vec3 pupil = mix(white, iris, pupMask);
-      // highlights
-      vec2 h1 = pc + vec2(-0.22 * pr, -0.42 * pr);
-      vec2 h2 = pc + vec2(0.18 * pr, -0.08 * pr);
-      float hi = cover(length(local - h1), 0.0, pr * 0.16);
-      hi += 0.55 * cover(length(local - h2), 0.0, pr * 0.08);
-      pupil = mix(pupil, vec3(1.0), clamp(hi, 0.0, 1.0));
-      eyeCol = mix(white, pupil, uKirby);
-    }
-    col = mix(col, eyeCol, em);
+    if(uEyeA[i] < 0.02) continue;
+    float dE = sdCapsuleEye(p, uEyeMat[i], uEyePos[i].xy, uEyePos[i].z, uEyePos[i].w);
+    float em = (1.0 - smoothstep(-aa, aa, dE)) * uEyeA[i];
+    col = mix(col, paper, em);
   }
 
-  // mouth interior
-  if(uMouth > 0.01 && uKirby < 0.4){
-    float mm = (1.0 - smoothstep(-aa, aa, dMouth)) * uKirby;
-    vec3 cavity = vec3(0.22, 0.05, 0.08);
-    col = mix(col, cavity, mm);
-  }
-
-  // arcs in front (thin residual)
+  // arcs in front (thin residual outside the body)
   for(int i = 0; i < 8; i++){
     if(i >= uArcN) break;
     float op = uArcB[i].w;
@@ -544,27 +257,368 @@ void main(){
     float dA = sdArcStroke(p, uArcA[i], uArcB[i], uArcC[i], uArcT[i]);
     vec3 ac = wheel(uArcC[i].x + uArcC[i].y * 0.35, 0.58, 0.64);
     float m = 1.0 - smoothstep(-aa, aa, dA);
-    m *= smoothstep(-aa, aa, dInk); // only outside body
+    m *= smoothstep(-aa, aa, dInk);
     col = mix(col, ac, m * op);
   }
 
   // blue badge
   if(uNotifOn > 0.5){
     float bm = 1.0 - smoothstep(-aa, aa, dBadge);
-    vec3 blue = vec3(0.141, 0.588, 0.910);
-    col = mix(col, blue, bm);
+    col = mix(col, vec3(0.141, 0.588, 0.910), bm);
+  }
+
+  return col;
+}
+
+/* ------------------------------------------------------------ kirby scene */
+
+vec3 kirbySky(vec2 uv){
+  float g = clamp(uv.y * 0.5 + 0.5, 0.0, 1.0);
+  vec3 top = vec3(0.52, 0.80, 0.97);
+  vec3 mid = vec3(0.70, 0.89, 0.99);
+  vec3 bot = vec3(0.80, 0.93, 0.90);
+  vec3 col = mix(bot, mid, smoothstep(0.0, 0.42, g));
+  col = mix(col, top, smoothstep(0.42, 1.0, g));
+  // puffy clouds
+  float c1 = cover(length((uv - vec2(-0.70, 0.30)) * vec2(1.0, 1.55)), 0.09, 0.24);
+  float c2 = cover(length((uv - vec2(-0.56, 0.27)) * vec2(1.1, 1.7)), 0.07, 0.18);
+  float c3 = cover(length((uv - vec2(0.72, 0.36)) * vec2(1.0, 1.65)), 0.08, 0.22);
+  float c4 = cover(length((uv - vec2(0.60, 0.33)) * vec2(1.15, 1.8)), 0.06, 0.16);
+  col = mix(col, vec3(1.0, 0.99, 0.97), clamp(c1 + c2 + c3 + c4, 0.0, 1.0) * 0.55);
+  // rolling green hills, Green Greens style, kept low behind the footer
+  float h1 = length((uv - vec2(-0.62, -1.78)) * vec2(1.0, 1.4)) - 1.38;
+  float h2 = length((uv - vec2(0.66, -1.86)) * vec2(1.0, 1.35)) - 1.46;
+  vec3 hillFar = vec3(0.72, 0.90, 0.62);
+  vec3 hillNear = vec3(0.58, 0.85, 0.50);
+  col = mix(col, hillFar, cover(h2, 0.0, 0.02) * 0.85);
+  col = mix(col, hillNear, cover(h1, 0.0, 0.02) * 0.9);
+  return col;
+}
+
+float sdSphere3(vec3 p, float r){ return length(p) - r; }
+
+float sdEllipsoid3(vec3 p, vec3 r){
+  float k0 = length(p / r);
+  float k1 = length(p / (r * r));
+  return k0 * (k0 - 1.0) / max(k1, 1e-4);
+}
+
+// canonical Kirby: body sphere r 0.70 at y +0.18 (y-up), feet below. id 1 = feet.
+vec2 mapKirby(vec3 p){
+  float body = sdSphere3(p - vec3(0.0, 0.18, 0.0), 0.70);
+  float swing = uReduced > 0.5 ? 0.0 : 0.04 * sin(uTime * 2.1);
+  float armL = sdSphere3(p - vec3(-0.585, 0.25 + swing, -0.12), 0.185);
+  float armR = sdSphere3(p - vec3( 0.585, 0.25 - swing * 0.7, -0.12), 0.185);
+  float flesh = smin(body, min(armL, armR), 0.04);
+
+  float feet = 1e5;
+  if(uShoes > 0.02){
+    float fs = smoothstep(0.0, 1.0, uShoes);
+    vec3 fl = p - vec3(-0.335, mix(-0.38, -0.60, fs), 0.10);
+    fl.xz = rot(0.42) * fl.xz;
+    fl.xy = rot(-0.22) * fl.xy;
+    float footL = sdEllipsoid3(fl, vec3(0.30, 0.165, 0.19) * (0.45 + 0.55 * fs));
+    vec3 fr = p - vec3( 0.335, mix(-0.38, -0.60, fs), 0.10);
+    fr.xz = rot(-0.42) * fr.xz;
+    fr.xy = rot(0.22) * fr.xy;
+    float footR = sdEllipsoid3(fr, vec3(0.30, 0.165, 0.19) * (0.45 + 0.55 * fs));
+    feet = smin(footL, footR, 0.04);
+  }
+
+  float d = smin(flesh, feet, 0.025);
+  return vec2(d, feet < flesh ? 1.0 : 0.0);
+}
+
+vec3 kirbyNormal(vec3 p){
+  vec2 e = vec2(0.0018, -0.0018);
+  return normalize(
+    e.xyy * mapKirby(p + e.xyy).x +
+    e.yyx * mapKirby(p + e.yyx).x +
+    e.yxy * mapKirby(p + e.yxy).x +
+    e.xxx * mapKirby(p + e.xxx).x
+  );
+}
+
+// Official eye: tall narrow oval, near-black; white gloss = top ~38%;
+// inset blue patch at the bottom, brightening downward. Closed = drawn line.
+void kirbyEye(inout vec3 col, vec2 f, vec2 c, float open, float size, float tiltDeg, float aa2){
+  vec2 e = rot(tiltDeg * PI / 180.0) * (f - c);
+  float hh = 0.2275 * size;
+  float ww = 0.075 * (0.88 + 0.12 * size);
+  vec3 ink = vec3(0.043, 0.043, 0.10);
+  float oo = clamp(open, 0.0, 1.0);
+
+  float ovalA = smoothstep(0.16, 0.30, oo);
+  if(ovalA > 0.003){
+    float oEase = smoothstep(0.16, 1.0, oo);
+    float hEff = hh * mix(0.22, 1.0, oEase);
+    float wEff = ww * mix(0.78, 1.0, oEase);
+    float dW = sdEllipse(e, vec2(wEff, hEff));
+    float m = cover(dW, -aa2, aa2) * ovalA;
+    if(m > 0.003){
+      vec3 eyeC = ink;
+      // blue bottom patch, inset from the rim
+      vec2 bc = vec2(0.0, hEff * 0.54);
+      float dB = max(dW + 0.014, sdEllipse(e - bc, vec2(wEff * 0.85, hEff * 0.46)));
+      float g = clamp((e.y - (bc.y - hEff * 0.46)) / max(hEff * 0.92, 1e-4), 0.0, 1.0);
+      vec3 blue = mix(vec3(0.075, 0.16, 0.45), vec3(0.30, 0.64, 0.93), smoothstep(0.1, 1.0, g));
+      eyeC = mix(eyeC, blue, cover(dB, -aa2, aa2));
+      // white gloss on top
+      vec2 wr = vec2(wEff * 0.74, hEff * 0.40);
+      float dHi = max(dW + 0.006, sdEllipse(e - vec2(0.0, -hEff + wr.y + hEff * 0.10), wr));
+      eyeC = mix(eyeC, vec3(0.995), cover(dHi, -aa2, aa2));
+      col = mix(col, eyeC, m);
+    }
+  }
+
+  float lineA = 1.0 - smoothstep(0.10, 0.24, oo);
+  if(lineA > 0.003){
+    vec2 el = rot(-1.6 * tiltDeg * PI / 180.0) * e;
+    float R0 = 0.34;
+    float y0 = 0.05;
+    float cap = cover(abs(el.x), ww * 1.45, ww * 2.25);
+    // relaxed closed eye: arc bowing down (ends up); keep only the near side
+    float dU = abs(length(el - vec2(0.0, y0 - R0)) - R0) - 0.032;
+    float sideU = step(y0 - R0, el.y);
+    float mU = cover(dU, -aa2, aa2) * cap * sideU * lineA * (1.0 - uArcEyes);
+    col = mix(col, ink, mU);
+    // happy closed eye: arc bowing up
+    if(uArcEyes > 0.003){
+      float cN = y0 + R0 - 0.10;
+      float dN = abs(length(el - vec2(0.0, cN)) - R0) - 0.032;
+      float sideN = step(el.y, cN);
+      float mN = cover(dN, -aa2, aa2) * cap * sideN * lineA * uArcEyes;
+      col = mix(col, ink, mN);
+    }
+  }
+}
+
+void kirbyMouth(inout vec3 col, vec2 f, float aa2){
+  float m = clamp(uMouth, 0.0, 1.0);
+  float rnd = clamp(uMouthRound, 0.0, 1.0);
+  vec3 lineC = vec3(0.30, 0.08, 0.17);
+
+  // resting line smile
+  float restA = 1.0 - smoothstep(0.03, 0.075, m);
+  if(restA > 0.003){
+    float R0 = 0.30;
+    float dArc = abs(length(f - vec2(0.0, -0.035 - R0)) - R0) - 0.013;
+    float capX = cover(abs(f.x), 0.052, 0.095);
+    float side = step(-0.035 - R0, f.y);
+    col = mix(col, lineC, cover(dArc, -aa2, aa2) * capX * side * restA);
+  }
+
+  float openA = smoothstep(0.03, 0.10, m);
+  if(openA > 0.003){
+    float mw = (0.055 + 0.305 * pow(m, 1.1)) * mix(1.15, 0.95, rnd);
+    float mh = mw * mix(0.66, 1.0, rnd);
+    float yTop = -0.095;
+    vec2 mc = vec2(0.0, yTop + mh);
+    float dM = sdEllipse(f - mc, vec2(mw, mh));
+    // smile: arch the top edge flat-ish
+    float dCut = -(f.y - (mc.y - mh * 0.58));
+    float d2 = max(dM, mix(dCut, dM, rnd));
+    float fill = cover(d2, -aa2, aa2) * openA;
+    if(fill > 0.003){
+      float g = clamp((f.y - (mc.y - mh)) / max(2.0 * mh, 1e-4), 0.0, 1.0);
+      float deep = smoothstep(0.45, 0.95, m) * rnd;
+      vec3 cavTop = mix(vec3(0.37, 0.07, 0.15), vec3(0.17, 0.03, 0.08), deep);
+      vec3 cavBot = mix(vec3(0.63, 0.14, 0.25), vec3(0.32, 0.07, 0.13), deep);
+      vec3 cav = mix(cavTop, cavBot, g);
+      // tongue for the open smile
+      float tA = (1.0 - smoothstep(0.3, 0.75, rnd)) * smoothstep(0.12, 0.3, m);
+      if(tA > 0.003){
+        vec2 tc = mc + vec2(0.0, mh * 0.42);
+        float dT = max(d2 + 0.010, sdEllipse(f - tc, vec2(mw * 0.72, mh * 0.55)));
+        cav = mix(cav, vec3(0.93, 0.38, 0.47), cover(dT, -aa2, aa2) * tA);
+      }
+      col = mix(col, cav, fill);
+    }
+    // outline
+    float ol = cover(abs(d2) - 0.012, -aa2, aa2) * openA;
+    col = mix(col, vec3(0.18, 0.04, 0.10), ol);
+  }
+}
+
+void kirbyBlush(inout vec3 col, vec2 f, float aa2){
+  for(int i = 0; i < 2; i++){
+    float sx = i == 0 ? -1.0 : 1.0;
+    vec2 e = rot(sx * 0.20) * (f - vec2(sx * 0.372, -0.225));
+    float d = sdEllipse(e, vec2(0.104, 0.056));
+    col = mix(col, vec3(0.945, 0.447, 0.498), cover(d, -0.006, 0.014) * 0.97);
+  }
+}
+
+vec3 kirbyScene(vec2 p, vec2 uv, float aa){
+  vec3 col = kirbySky(uv);
+
+  float scl = max(uSilScale, 0.02);
+  float sqMin = max(min(uSquash.x, uSquash.y), 1e-4);
+  float aa2 = min(aa / (scl * sqMin), 0.05);
+
+  // canonical space
+  vec2 q = p - vec2(uSil.y, uSil.z);
+  q.x /= max(uSquash.x, 1e-4);
+  q.y /= max(uSquash.y, 1e-4);
+  q = rot(-uSil.x) * q;
+  q /= scl;
+
+  // ground shadow
+  float bottomY = uSil.z + (0.52 + 0.30 * uShoes) * scl * uSquash.y;
+  float sfade = clamp(1.0 - (1.0 - bottomY) * 1.5, 0.0, 1.0);
+  float sw = 0.55 * scl + 0.24;
+  float sh = length((p - vec2(uSil.y, 1.04)) * vec2(1.0 / sw, 3.2)) - 1.0;
+  col -= exp(-max(sh, 0.0) * max(sh, 0.0) * 8.0) * 0.20 * sfade * vec3(0.16, 0.13, 0.08);
+
+  // body proxy for dimming decor behind the puff
+  float dProxy = length(p - vec2(uSil.y, uSil.z)) - scl * 0.86;
+
+  // rings behind
+  for(int i = 0; i < 8; i++){
+    if(i >= uArcN) break;
+    float op = uArcB[i].w;
+    if(op < 0.01) continue;
+    float dA = sdArcStroke(p, uArcA[i], uArcB[i], uArcC[i], uArcT[i]);
+    vec3 ac = wheel(uArcC[i].x + uArcC[i].y * 0.5, 0.52, 0.74);
+    float m = 1.0 - smoothstep(-aa, aa, dA);
+    m *= mix(1.0, 0.22, cover(dProxy, -aa, aa));
+    col = mix(col, ac, m * op);
+  }
+
+  // warp star trailing the tumble
+  if(uStar > 0.02){
+    float sr = uSil.x - 1.15;
+    vec2 sp0 = vec2(-sin(sr), cos(sr)) * 0.98;
+    vec2 sq = rot(uSil.x * 0.12 + 0.15) * (p - sp0);
+    float dS = sdStar5(sq, 0.30, 0.46);
+    float m = cover(dS, -aa * 1.4, aa) * uStar;
+    float ring = cover(abs(dS) - 0.017, -aa, aa) * uStar;
+    vec3 starC = mix(vec3(1.0, 0.91, 0.47), vec3(1.0, 0.77, 0.15), smoothstep(-0.24, 0.0, dS));
+    col = mix(col, starC, m);
+    col = mix(col, vec3(0.24, 0.11, 0.24), ring);
+  }
+
+  // burst sparkles (dot kind 0) behind the body
+  for(int i = 0; i < 8; i++){
+    if(i >= uDotN) break;
+    vec4 D = uDots[i];
+    if(D.w < 0.01 || uDotMeta[i].x > 0.5) continue;
+    vec2 sq = rot(uTime * 1.6 + float(i) * 1.7) * (p - D.xy);
+    float dS = sdStar5(sq, D.z * 1.8, 0.48);
+    vec3 sc = mix(vec3(1.0, 0.87, 0.44), vec3(1.0, 0.66, 0.78), fract(float(i) * 0.37));
+    col = mix(col, sc, cover(dS, -aa * 1.4, aa) * D.w);
+  }
+
+  // ---- the puffball ----
+  vec3 ro = vec3(q.x, -q.y, -2.6);
+  vec3 rd = vec3(0.0, 0.0, 1.0);
+  float outw = 0.052 / clamp(scl, 0.35, 1.6);
+
+  float t = 0.0;
+  vec2 h = vec2(1.0, 0.0);
+  bool hitBody = false;
+  for(int i = 0; i < 56; i++){
+    h = mapKirby(ro + rd * t);
+    if(h.x < 0.0012){ hitBody = true; break; }
+    t += h.x;
+    if(t > 5.5) break;
+  }
+
+  if(!hitBody){
+    // outline hull
+    t = 0.0;
+    for(int i = 0; i < 40; i++){
+      float d = mapKirby(ro + rd * t).x - outw;
+      if(d < 0.0012){
+        col = vec3(0.18, 0.07, 0.19);
+        hitBody = false;
+        t = -1.0;
+        break;
+      }
+      t += d;
+      if(t > 5.5) break;
+    }
+  } else {
+    vec3 hit = ro + rd * t;
+    vec3 N = kirbyNormal(hit);
+    vec3 L = normalize(vec3(-0.32, 0.74, -0.58));
+    float ndl = dot(N, L);
+    float cel = smoothstep(0.08, 0.115, ndl);
+    float deep = smoothstep(-0.34, -0.30, ndl);
+
+    vec3 body;
+    if(h.y > 0.5){
+      vec3 footLit = vec3(0.855, 0.110, 0.361);
+      vec3 footSh = vec3(0.647, 0.055, 0.267);
+      body = mix(footSh, footLit, cel);
+      // cel gloss spot
+      vec3 half_ = normalize(L + vec3(0.0, 0.0, -1.0));
+      float spec = smoothstep(0.855, 0.875, dot(N, half_));
+      body = mix(body, vec3(0.96, 0.42, 0.49), spec * 0.9);
+    } else {
+      vec3 lit = vec3(0.980, 0.659, 0.773);
+      vec3 shade = vec3(0.933, 0.498, 0.663);
+      vec3 deepC = vec3(0.870, 0.400, 0.590);
+      body = mix(mix(deepC, shade, deep), lit, cel);
+    }
+
+    // face on the front of the body
+    if(h.y < 0.5 && N.z < -0.10 && uFaceAlpha > 0.005){
+      vec2 f = vec2(hit.x, -hit.y);
+      vec3 faceCol = body;
+      vec2 gOff = vec2(clamp(uGaze.x, -40.0, 40.0) * 0.0016,
+                       clamp(-uGaze.y, -34.0, 34.0) * 0.0013);
+      kirbyBlush(faceCol, f - gOff * 0.5, aa2);
+      kirbyMouth(faceCol, f - gOff * 0.6, aa2);
+      kirbyEye(faceCol, f, vec2(-0.154, -0.355) + gOff, uKEye.x, uKEye.y, uKTilt.x, aa2);
+      kirbyEye(faceCol, f, vec2( 0.154, -0.355) + gOff, uKEye.z, uKEye.w, uKTilt.y, aa2);
+      body = mix(body, faceCol, uFaceAlpha);
+    }
+    col = body;
+  }
+
+  // sleep Zs (dot kind 2), in front
+  for(int i = 0; i < 8; i++){
+    if(i >= uDotN) break;
+    vec4 D = uDots[i];
+    if(D.w < 0.01 || uDotMeta[i].x < 1.5) continue;
+    vec2 zq = rot(uDotMeta[i].y * PI / 180.0) * (p - D.xy) / max(D.z, 0.01);
+    float dZ = sdZ(zq) * D.z;
+    col = mix(col, vec3(0.94, 0.97, 1.0), cover(dZ, -aa, aa) * D.w);
+    col = mix(col, vec3(0.24, 0.13, 0.28), cover(abs(dZ) - 0.008, -aa, aa) * D.w * 0.85);
+  }
+
+  // notification badge rides on top, sticker-style
+  if(uNotifOn > 0.5){
+    float dB = sdCircle(p - uNotif.xy, uNotif.z);
+    col = mix(col, vec3(0.141, 0.588, 0.910), cover(dB, -aa, aa));
+    col = mix(col, vec3(0.18, 0.07, 0.19), cover(abs(dB) - 0.016, -aa, aa));
+  }
+
+  return col;
+}
+
+void main(){
+  vec2 frag = gl_FragCoord.xy;
+  // Model space is y-down (same as the reference film). gl_FragCoord is y-up.
+  vec2 p = (frag - uCenter) / uScale;
+  p.y = -p.y;
+  vec2 uv = (frag - 0.5 * uRes) / uRes.y;
+  float aa = 1.5 / uScale;
+
+  vec3 col;
+  float kf = smoothstep(0.05, 0.85, uKirby);
+  if(kf < 0.004){
+    col = grokScene(p, uv, aa);
+  } else if(kf > 0.996){
+    col = kirbyScene(p, uv, aa);
+  } else {
+    col = mix(grokScene(p, uv, aa), kirbyScene(p, uv, aa), kf);
   }
 
   // vignette, tiny grain
-  float vig = 1.0 - 0.08 * uKirby * dot(uv, uv);
-  col *= vig;
-  float g = hash(frag + uTime * 17.0) - 0.5;
-  col += g * 0.015;
-
-  if(uKirby > 0.02){
-    vec3 kcol = renderKirby(p, bg);
-    col = mix(col, kcol, smoothstep(0.04, 0.72, uKirby));
-  }
+  col *= 1.0 - 0.08 * uKirby * dot(uv, uv);
+  col += (hash(frag + uTime * 17.0) - 0.5) * 0.015;
 
   fragColor = vec4(col, 1.0);
 }
@@ -616,6 +670,10 @@ function createRenderer(canvas) {
   }
 
   const radii = new Float32Array(64);
+  const sstep = (a, b, x) => {
+    const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
+    return t * t * (3 - 2 * t);
+  };
 
   function resize() {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -639,7 +697,12 @@ function createRenderer(canvas) {
     const cx = W * 0.5;
     const cy = H * (portrait ? 0.50 : 0.46 + 0.03 * kirby);
 
-    for (let i = 0; i < 64; i++) radii[i] = frame.sil.radii[i] ?? 1;
+    let meanR = 0;
+    for (let i = 0; i < 64; i++) {
+      radii[i] = frame.sil.radii[i] ?? 1;
+      meanR += radii[i];
+    }
+    meanR /= 64;
 
     gl.uniform2f(U.uRes, W, H);
     gl.uniform1f(U.uTime, now);
@@ -649,6 +712,7 @@ function createRenderer(canvas) {
     gl.uniform1fv(U.uRadii, radii);
     gl.uniform4f(U.uSil, frame.sil.rot, frame.sil.cx, frame.sil.cy, 0);
     gl.uniform2f(U.uSquash, frame.sil.sx, frame.sil.sy);
+    gl.uniform1f(U.uSilScale, meanR);
     gl.uniform1f(U.uBodyAlpha, frame.bodyAlpha);
     gl.uniform1f(U.uReduced, reduced ? 1 : 0);
 
@@ -657,12 +721,17 @@ function createRenderer(canvas) {
     const pos = [];
     const mat = [];
     const alpha = [0, 0];
+    const kEye = [1, 1, 1, 1];
+    const kTilt = [0, 0];
     for (let i = 0; i < 2; i++) {
       const e = frame.eyes[i];
       if (e) {
         pos.push(e.x, e.y, e.w, e.h);
         mat.push(e.a, e.b, e.c, e.d);
         alpha[i] = e.alpha;
+        kEye[i * 2] = sstep(0.12, 0.38, e.h) * sstep(0.0, 0.75, e.open ?? 1);
+        kEye[i * 2 + 1] = 1 + 0.28 * sstep(0.45, 0.85, e.h);
+        kTilt[i] = e.tilt ?? 0;
       } else {
         pos.push(0, 0, 0.1, 0.1);
         mat.push(1, 0, 0, 1);
@@ -671,6 +740,11 @@ function createRenderer(canvas) {
     gl.uniform4fv(U.uEyePos, pos);
     gl.uniform4fv(U.uEyeMat, mat);
     gl.uniform2f(U.uEyeA, alpha[0], alpha[1]);
+    gl.uniform4f(U.uKEye, kEye[0], kEye[1], kEye[2], kEye[3]);
+    gl.uniform2f(U.uKTilt, kTilt[0], kTilt[1]);
+    gl.uniform1f(U.uFaceAlpha, frame.eyeAlpha ?? (frame.eyes.length ? 1 : 0));
+    gl.uniform1f(U.uArcEyes, frame.arcEyes || 0);
+    gl.uniform1f(U.uMouthRound, frame.mouthRound || 0);
     gl.uniform2f(U.uGaze, frame.gaze.yaw, frame.gaze.pitch);
 
     const dots = frame.dots.slice(0, 8);

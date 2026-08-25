@@ -343,6 +343,22 @@ function dotPulse(t, index) {
   return clamp(k * 2);
 }
 
+function sleepZs(t) {
+  const out = [];
+  for (let i = 0; i < 3; i++) {
+    const u = ((((t - i * 1.1) / 3.3) % 1) + 1) % 1;
+    out.push({
+      x: 0.66 + u * 0.5 + 0.03 * Math.sin(u * TAU * 1.5 + i),
+      y: -0.66 - u * 0.6,
+      r: 0.055 + 0.05 * u,
+      opacity: clamp(u / 0.15) * clamp((1 - u) / 0.25) * 0.95,
+      kind: 2,
+      rot: -12 + 9 * Math.sin(u * TAU + i * 2.1),
+    });
+  }
+  return out;
+}
+
 /* ------------------------------------------------------------------ expressions */
 
 function eye(w, h, tilt = 0, open = 1) {
@@ -356,7 +372,7 @@ const EXPRESSIONS = {
   rest: { gaze: { ...REST_GAZE }, split: EYE_SPLIT, eyes: [eye(EYE_W, EYE_H), eye(EYE_W, EYE_H)] },
   attentive: { gaze: { yaw: 4, pitch: 5, roll: -4 }, split: 16, eyes: pair(0.21, 0.44) },
   surprised: { gaze: { yaw: 3, pitch: -3, roll: 0 }, split: 19, eyes: pair(0.45, 0.47) },
-  happy: { gaze: { yaw: 5, pitch: 9, roll: 0 }, split: 17, eyes: pair(0.27, 0.17, 14) },
+  happy: { gaze: { yaw: 5, pitch: 9, roll: 0 }, split: 17, eyes: pair(0.27, 0.17, 14), arcEyes: 1 },
   angry: { gaze: { yaw: 3, pitch: 7, roll: 0 }, split: 17, eyes: pair(0.34, 0.15, 30) },
   sad: { gaze: { yaw: 3, pitch: -13, roll: 0 }, split: 16, eyes: pair(0.22, 0.4, -28) },
   curious: { gaze: { yaw: 16, pitch: -9, roll: -15 }, split: 16.5, eyes: [eye(0.24, 0.46, -8), eye(0.2, 0.38, -8)] },
@@ -373,6 +389,7 @@ function blendExpr(a, b, t) {
       roll: lerp(a.gaze.roll, b.gaze.roll, t),
     },
     split: lerp(a.split, b.split, t),
+    arcEyes: lerp(a.arcEyes ?? 0, b.arcEyes ?? 0, t),
     eyes: [
       {
         w: lerp(a.eyes[0].w, b.eyes[0].w, t),
@@ -409,6 +426,8 @@ function base(over = {}) {
     arcs: [],
     notif: null,
     mouth: 0,
+    mouthRound: 0,
+    arcEyes: 0,
     shoes: 1,
     star: 0,
     dotsBehind: false,
@@ -466,6 +485,12 @@ const STATES = {
           { w: 0.447, h: 0.089, open: 1, tilt: 0 },
         ],
       }),
+    kirbyPose: () =>
+      base({
+        gaze: { yaw: -5, pitch: 3, roll: 5 },
+        eyes: [eye(0.22, 0.47), eye(0.3, 0.05, 0, 0)],
+        mouth: 0.3,
+      }),
   },
   wide: {
     duration: 1.8,
@@ -478,6 +503,13 @@ const STATES = {
         gaze: { yaw: 6.92, pitch: -21.96, roll: 11.6 },
         split: 18.43,
         eyes: pair(0.356, 0.875),
+      }),
+    kirbyPose: () =>
+      base({
+        gaze: { yaw: 4, pitch: -10, roll: 3 },
+        eyes: pair(0.3, 0.8),
+        mouth: 0.16,
+        mouthRound: 1,
       }),
   },
   alert: {
@@ -533,6 +565,24 @@ const STATES = {
         },
       });
     },
+    kirbyPose: (t) => {
+      const p = clamp(t / 0.45);
+      const pop = 1 + (NOTIF_POP - 1) * Math.sin(p * Math.PI) * (1 - p * 0.35);
+      const r = NOTIF_R * (p < 1 ? pop : 1);
+      const a = (NOTIF_ANGLE * Math.PI) / 180;
+      return base({
+        gaze: { yaw: 19, pitch: 7, roll: 0 },
+        eyes: pair(0.24, 0.52),
+        mouth: 0.14,
+        mouthRound: 1,
+        notif: {
+          x: Math.cos(a) * NOTIF_DIST,
+          y: Math.sin(a) * NOTIF_DIST,
+          r,
+          notch: r + NOTIF_MARGIN,
+        },
+      });
+    },
   },
   exclaim: {
     duration: 2,
@@ -559,6 +609,15 @@ const STATES = {
         sil: circle(0.1585, { cy: 0.11 + Math.sin(t * (TAU / 0.6)) * 0.19 }),
         eyeAlpha: 0,
         shoes: 0,
+      }),
+    kirbyPose: (t) =>
+      base({
+        sil: circle(1, { rot: 0.1, sy: 1 + Math.sin((t / 3.2) * TAU) * 0.02 }),
+        gaze: { yaw: 0, pitch: 0, roll: 5 },
+        eyes: pair(0.2, 0.05, 0, 0),
+        mouth: 0.1,
+        mouthRound: 1,
+        dots: sleepZs(t),
       }),
   },
   egg: {
@@ -641,6 +700,27 @@ const STATES = {
         })),
       });
     },
+    kirbyPose: (t) => {
+      // Kirby stays a ball: two full tumbles along a small loop, warp star in tow.
+      const spin = easeInOutCubic(clamp(t / 1.7)) * 2;
+      const rot = -TAU * spin;
+      const back = easeInOutCubic(clamp((t - 1.6) / 0.9));
+      const fade = clamp(t / 0.8) * clamp((3.6 - t) / 0.9);
+      const orbitR = TRI_ORBIT * (1 - back);
+      return base({
+        sil: circle(1, { rot, cx: -orbitR * Math.sin(rot), cy: orbitR * Math.cos(rot) }),
+        gaze: { yaw: 0, pitch: -6, roll: 0 },
+        eyes: pair(0.22, 0.5),
+        mouth: 0.35,
+        star: 1 - back,
+        arcs: RINGS.map((s, i) => ({
+          ...s,
+          t,
+          opacity: fade * clamp((t - i * 0.13) / 0.3),
+          id: i,
+        })),
+      });
+    },
   },
   burst: {
     duration: 2.6,
@@ -697,6 +777,18 @@ const STATES = {
         shoes: 1,
       });
     },
+    kirbyPose: (t) => {
+      const p = clamp(t / 0.35);
+      const hold = t > 0.35 && t < 1.5 ? 1 : t >= 1.5 ? 1 - clamp((t - 1.5) / 0.5) : p;
+      const h = easeOutCubic(hold);
+      return base({
+        sil: circle(1, { rot: -0.06 * h, sx: 1 + 0.03 * h, sy: 1 - 0.02 * h }),
+        gaze: { yaw: 0, pitch: 8, roll: 0 },
+        eyes: pair(0.24, 0.55),
+        mouth: 0.2 + 0.8 * h,
+        mouthRound: 1,
+      });
+    },
   },
   puff: {
     duration: 2,
@@ -715,6 +807,14 @@ const STATES = {
         mouth: 0.12,
       });
     },
+    kirbyPose: () =>
+      base({
+        sil: circle(1.18, { sy: 1.05 }),
+        gaze: { yaw: 0, pitch: 4, roll: 0 },
+        eyes: pair(0.2, 0.4),
+        mouth: 0.12,
+        mouthRound: 1,
+      }),
   },
   happy: {
     duration: 2,
@@ -729,6 +829,13 @@ const STATES = {
         eyes: pair(0.27, 0.17, 14),
         mouth: 0.22,
       }),
+    kirbyPose: () =>
+      base({
+        gaze: { yaw: 0, pitch: 4, roll: 0 },
+        eyes: pair(0.2, 0.05, 0, 0),
+        arcEyes: 1,
+        mouth: 0.5,
+      }),
   },
   curious: {
     duration: 2,
@@ -741,6 +848,12 @@ const STATES = {
         gaze: { yaw: 16, pitch: -9, roll: -15 },
         split: 16.5,
         eyes: [eye(0.24, 0.46, -8), eye(0.2, 0.38, -8)],
+      }),
+    kirbyPose: () =>
+      base({
+        sil: circle(1, { rot: 0.09 }),
+        gaze: { yaw: 16, pitch: -9, roll: -10 },
+        eyes: [eye(0.22, 0.48, -6), eye(0.2, 0.42, -6)],
       }),
   },
 };
@@ -810,6 +923,8 @@ function blendPose(a, b, t) {
     ],
     notif: t < 0.5 ? a.notif : b.notif,
     mouth: lerp(a.mouth, b.mouth, t),
+    mouthRound: lerp(a.mouthRound ?? 0, b.mouthRound ?? 0, t),
+    arcEyes: lerp(a.arcEyes ?? 0, b.arcEyes ?? 0, t),
     shoes: lerp(a.shoes, b.shoes, t),
     star: lerp(a.star ?? 0, b.star ?? 0, t),
     dotsBehind: t < 0.5 ? a.dotsBehind : b.dotsBehind,
@@ -832,6 +947,7 @@ class BotEngine {
     this.lookAt = -10;
     this.lookMorph = 0.24;
     this.reduced = false;
+    this.kirby = false;
   }
 
   setState(id, now) {
@@ -896,11 +1012,26 @@ class BotEngine {
   }
 
   posed(def, t, expr) {
-    let pose = def.pose(t);
+    let pose = this.kirby && def.kirbyPose ? def.kirbyPose(t) : def.pose(t);
     if (def.baseFace && expr) {
-      pose = { ...pose, gaze: expr.gaze, split: expr.split, eyes: expr.eyes };
+      const gaze = this.kirby
+        ? {
+            yaw: (expr.gaze.yaw - REST_GAZE.yaw) * 0.85,
+            pitch: (expr.gaze.pitch - REST_GAZE.pitch) * 0.85,
+            roll: expr.gaze.roll,
+          }
+        : expr.gaze;
+      pose = { ...pose, gaze, split: expr.split, eyes: expr.eyes, arcEyes: expr.arcEyes ?? 0 };
     }
     return pose;
+  }
+
+  remorph(now) {
+    // re-enter the current state so a pose-family change morphs instead of snapping
+    this.frozen = this.composed(now);
+    this.prev = this.cur;
+    this.tPrev = this.tCur;
+    this.tCur = now;
   }
 
   origin(now, expr) {
@@ -978,6 +1109,8 @@ class BotEngine {
           d: cy2 * k,
           w: cfg.w,
           h: cfg.h,
+          open: Math.min(lid, cfg.open),
+          tilt: cfg.tilt ?? 0,
           alpha: pose.eyeAlpha * clamp(e.depth / 0.12),
           depth: e.depth,
         });
@@ -1004,8 +1137,11 @@ class BotEngine {
       arcs: pose.arcs.filter((a) => a.opacity > 0.01),
       notif,
       mouth: pose.mouth,
+      mouthRound: pose.mouthRound ?? 0,
+      arcEyes: pose.arcEyes ?? 0,
       shoes: pose.shoes,
       star: pose.star ?? 0,
+      eyeAlpha: pose.eyeAlpha,
       bodyAlpha: pose.bodyAlpha,
       gaze,
       lid,

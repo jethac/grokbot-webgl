@@ -2,6 +2,8 @@
 
 A WebGL2 port of the Grok Bot mascot. Eyes live on a sphere. Press **K** for Kirby mode.
 
+Live at [grokbot-webgl.jethachan.net](https://grokbot-webgl.jethachan.net/).
+
 Grok Bot was designed for Grok Build. This is a fan specimen of the icon and the way its eyes move, plus a HAL-styled Kirby dress. Nintendo / HAL own Kirby. xAI owns Grok Bot.
 
 ## Run

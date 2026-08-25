@@ -70,14 +70,25 @@
   }
 
   function setKirby(on) {
+    const t = now();
     kirbyTarget = on ? 1 : 0;
+    engine.kirby = on;
     kirbyBtn.setAttribute("aria-pressed", on ? "true" : "false");
     document.body.classList.toggle("kirby", on);
-    buildChips();
-    if (on && !STATES[engine.cur]) engine.setState("idle", now());
-    if (on && GROK_STATES.includes(engine.cur) && !KIRBY_STATES.includes(engine.cur)) {
-      engine.setState("idle", now());
+    const list = on ? KIRBY_STATES : GROK_STATES;
+    if (playing) {
+      // restart the reel in the new mode instead of playing stale states
+      playList = on ? KIRBY_SEQUENCE : SEQUENCE;
+      playIndex = 0;
+      engine.reset(playList[0], t);
+      playHoldUntil = t + STATES[playList[0]].duration;
+    } else if (!STATES[engine.cur] || !list.includes(engine.cur)) {
+      engine.setState("idle", t);
+    } else {
+      // same state, new pose family — morph instead of snapping
+      engine.remorph(t);
     }
+    buildChips();
   }
 
   function buildChips() {
@@ -193,7 +204,7 @@
         {
           yaw: pointerOn ? yaw : 0,
           pitch: pointerOn ? pitch : 0,
-          mix: 1,
+          mix: pointerOn ? 1 : 0,
           wander: pointerOn ? 0.2 : 0.35,
         },
         t,
@@ -219,7 +230,10 @@
     kirby = 1;
   }
   const startState = params.get("state");
-  if (startState && STATES[startState]) engine.setState(startState, now());
+  const startList = kirbyTarget > 0.5 ? KIRBY_STATES : GROK_STATES;
+  if (startState && STATES[startState] && startList.includes(startState)) {
+    engine.setState(startState, now());
+  }
   const startFace = params.get("face");
   if (startFace && EXPRESSIONS[startFace]) engine.setExpression(startFace, now());
 
@@ -270,6 +284,7 @@
     last = ts / 1000;
     const k = reduced ? 1 : 1 - Math.exp(-dt * 5.2);
     kirby += (kirbyTarget - kirby) * k;
+    if (Math.abs(kirbyTarget - kirby) < 0.005) kirby = kirbyTarget;
     lookFromPointer(t);
     tickPlay(t);
     const sample = engine.sample(t);
