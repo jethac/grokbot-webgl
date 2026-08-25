@@ -2,8 +2,12 @@
   const { BotEngine, STATES, SEQUENCE, KIRBY_SEQUENCE, EXPRESSIONS, REST_GAZE, clamp } =
     window.GrokBotEngine;
 
+  // Kirby mode is dormant: flip to true to restore the toggle, K key, and ?kirby param.
+  const KIRBY_ENABLED = false;
+
   const canvas = document.getElementById("stage");
   const kirbyBtn = document.getElementById("kirby");
+  if (kirbyBtn && !KIRBY_ENABLED) kirbyBtn.remove();
   const stateRow = document.getElementById("states");
   const faceRow = document.getElementById("faces");
   const cursorEl = document.getElementById("cursor");
@@ -73,7 +77,7 @@
     const t = now();
     kirbyTarget = on ? 1 : 0;
     engine.kirby = on;
-    kirbyBtn.setAttribute("aria-pressed", on ? "true" : "false");
+    if (kirbyBtn) kirbyBtn.setAttribute("aria-pressed", on ? "true" : "false");
     document.body.classList.toggle("kirby", on);
     const list = on ? KIRBY_STATES : GROK_STATES;
     if (playing) {
@@ -101,14 +105,16 @@
     play.setAttribute("aria-pressed", playing ? "true" : "false");
     play.addEventListener("click", togglePlay);
     stateRow.appendChild(play);
-    const kchip = document.createElement("button");
-    kchip.className = "play";
-    kchip.id = "kirby-chip";
-    kchip.type = "button";
-    kchip.textContent = kirbyTarget > 0.5 ? "kirby on" : "kirby";
-    kchip.setAttribute("aria-pressed", kirbyTarget > 0.5 ? "true" : "false");
-    kchip.addEventListener("click", () => setKirby(kirbyTarget < 0.5));
-    stateRow.appendChild(kchip);
+    if (KIRBY_ENABLED) {
+      const kchip = document.createElement("button");
+      kchip.className = "play";
+      kchip.id = "kirby-chip";
+      kchip.type = "button";
+      kchip.textContent = kirbyTarget > 0.5 ? "kirby on" : "kirby";
+      kchip.setAttribute("aria-pressed", kirbyTarget > 0.5 ? "true" : "false");
+      kchip.addEventListener("click", () => setKirby(kirbyTarget < 0.5));
+      stateRow.appendChild(kchip);
+    }
     for (const id of list) {
       const b = document.createElement("button");
       b.className = "chip";
@@ -225,7 +231,7 @@
   }
 
   const params = new URLSearchParams(location.search);
-  if (params.has("kirby")) {
+  if (KIRBY_ENABLED && params.has("kirby")) {
     setKirby(true);
     kirby = 1;
   }
@@ -237,7 +243,7 @@
   const startFace = params.get("face");
   if (startFace && EXPRESSIONS[startFace]) engine.setExpression(startFace, now());
 
-  kirbyBtn.addEventListener("click", () => setKirby(kirbyTarget < 0.5));
+  if (kirbyBtn && KIRBY_ENABLED) kirbyBtn.addEventListener("click", () => setKirby(kirbyTarget < 0.5));
 
   canvas.addEventListener("pointermove", (e) => {
     pointerOn = true;
@@ -258,7 +264,7 @@
 
   window.addEventListener("keydown", (e) => {
     if (e.repeat) return;
-    if (e.key === "k" || e.key === "K") setKirby(kirbyTarget < 0.5);
+    if (KIRBY_ENABLED && (e.key === "k" || e.key === "K")) setKirby(kirbyTarget < 0.5);
     if (e.key === " ") {
       e.preventDefault();
       togglePlay();
