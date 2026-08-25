@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>bot — webgl specimen</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Syne:wght@600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <canvas id="stage" aria-label="Grok Bot mascot"></canvas>
+    <div id="cursor" hidden></div>
+
+    <header>
+      <h1 class="wordmark">
+        bot
+        <span>webgl specimen</span>
+      </h1>
+      <button class="toggle" id="kirby" type="button" aria-pressed="false" title="Kirby mode">
+        <span class="toggle-label">kirby</span>
+        <span class="switch" aria-hidden="true"><span class="knob"></span></span>
+      </button>
+    </header>
+
+    <p class="hint">the eyes live on a sphere</p>
+
+    <footer>
+      <div class="row" id="states"></div>
+      <div class="row" id="faces"></div>
+      <div class="meta">
+        <p>
+          Eyes measured off
+          <a href="https://x.com/benjitaylor/status/2087227155076046995">Benji Taylor</a>’s
+          Grok Build film. Icon:
+          <a href="https://x.com/kenneth_kuh">Kenneth Kuh</a>,
+          Justin Jay Wang, Luke Barker, John Bai.
+        </p>
+        <p>
+          Pointer looks. Click blinks. K dresses Kirby. Space plays the reel.
+          Kirby mode follows
+          <a href="https://x.com/Kirby_JP">@Kirby_JP</a>
+          (HAL Laboratory). Fan dress — HAL / Nintendo own that puffball.
+        </p>
+      </div>
+    </footer>
+
+    <script src="js/engine.js"></script>
+    <script src="js/render.js"></script>
+    <script src="js/main.js"></script>
+  </body>
+</html>
