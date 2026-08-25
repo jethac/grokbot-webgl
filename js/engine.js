@@ -831,9 +831,8 @@ const STATES = {
       }),
     kirbyPose: () =>
       base({
-        gaze: { yaw: 0, pitch: 4, roll: 0 },
-        eyes: pair(0.2, 0.05, 0, 0),
-        arcEyes: 1,
+        gaze: { yaw: 0, pitch: 6, roll: 0 },
+        eyes: pair(0.22, 0.48),
         mouth: 0.5,
       }),
   },
